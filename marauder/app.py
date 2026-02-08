@@ -49,16 +49,19 @@ class MarauderApp(App):
     }
 
     TabbedContent {
+        height: 1fr;
+        background: #000000;
+    }
+
+    ContentSwitcher {
+        height: 1fr;
         background: #000000;
     }
 
     TabPane {
+        height: 1fr;
         background: #000000;
         padding: 0;
-    }
-
-    ContentSwitcher {
-        background: #000000;
     }
 
     Tabs {
