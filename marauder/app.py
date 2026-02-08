@@ -103,6 +103,7 @@ class MarauderApp(App):
         self.bridge = SerialBridge()
         self.engine = MarauderEngine(self.bridge)
         self._session_active = False
+        self._thread_id: int = 0
 
     def compose(self) -> ComposeResult:
         yield Header(show_clock=True)
@@ -119,6 +120,8 @@ class MarauderApp(App):
         yield Footer()
 
     def on_mount(self) -> None:
+        import threading
+        self._thread_id = threading.get_ident()
         self._dashboard = self.query_one("#dashboard", Dashboard)
         self._attacks = self.query_one("#attacks", AttacksPanel)
         self._logs = self.query_one("#logs", LogsPanel)
@@ -129,19 +132,32 @@ class MarauderApp(App):
         self._serial.set_engine(self.engine)
 
         self.engine.on_state_change(self._on_engine_update)
-        self._try_connect()
+        self._set_status(" [yellow]Connecting to ESP32...[/yellow]")
+        self.run_worker(self._try_connect, thread=True)
 
     def _try_connect(self) -> None:
-        """Attempt to connect to ESP32."""
+        """Attempt to connect to ESP32 (runs in worker thread)."""
         try:
             self.bridge.connect()
-            self._update_status()
+            self.call_from_thread(self._on_connected)
         except Exception as e:
-            self._set_status(f"[red]No device found: {e}[/red]")
+            self.call_from_thread(self._on_connect_failed, str(e))
+
+    def _on_connected(self) -> None:
+        self.engine.is_connected = True
+        self._update_status()
+
+    def _on_connect_failed(self, error: str) -> None:
+        self.engine.is_connected = False
+        self._set_status(f"[red]No device found: {error}[/red]")
 
     def _on_engine_update(self, event_type: str, data: object) -> None:
-        """Called by engine on state changes (from serial thread)."""
-        self.call_from_thread(self._apply_update, event_type, data)
+        """Called by engine on state changes (may be from serial or main thread)."""
+        import threading
+        if self._thread_id == threading.get_ident():
+            self._apply_update(event_type, data)
+        else:
+            self.call_from_thread(self._apply_update, event_type, data)
 
     def _apply_update(self, event_type: str, data: object) -> None:
         """Apply engine update on the main thread."""

@@ -92,10 +92,10 @@ Event = Union[
 # Regex patterns for Marauder output
 # ---------------------------------------------------------------------------
 
-# AP scan line:  -42 ESSID: MyNetwork Ch: 6 BSSID: AA:BB:CC:DD:EE:FF
+# AP scan line:  -58 Ch: 2 BSSID: 1c:3b:f3:7e:9e:94 ESSID: wifi_casa
 _RE_AP = re.compile(
-    r"^(-?\d+)\s+ESSID:\s*(.*?)\s+Ch:\s*(\d+)\s+BSSID:\s*"
-    r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s*$"
+    r"^(-?\d+)\s+Ch:\s*(\d+)\s+BSSID:\s*"
+    r"([0-9A-Fa-f]{2}(?::[0-9A-Fa-f]{2}){5})\s+ESSID:\s*(.*?)\s*$"
 )
 
 # Station scan line:  -55 Station: AA:BB:CC:DD:EE:FF Associated: 11:22:33:44:55:66
@@ -114,9 +114,12 @@ _RE_BLE_MAC = re.compile(
 )
 
 # Scan started indicators
-_RE_SCAN_STARTED_WIFI = re.compile(r"Starting WiFi scan", re.IGNORECASE)
-_RE_SCAN_STARTED_BT = re.compile(r"Starting Bluetooth scan", re.IGNORECASE)
-_RE_SCAN_STARTED_AP = re.compile(r"Started AP Scan", re.IGNORECASE)
+_RE_SCAN_STARTED_AP = re.compile(r"Starting AP scan", re.IGNORECASE)
+_RE_SCAN_STARTED_BT = re.compile(r"Starting (Bluetooth|BLE|BT) scan", re.IGNORECASE)
+_RE_SCAN_STARTED_STA = re.compile(r"Starting (Station|STA) scan", re.IGNORECASE)
+
+# Beacon info lines (ignored)
+_RE_BEACON = re.compile(r"^Beacon:", re.IGNORECASE)
 
 # Scan stopped indicators
 _RE_SCAN_STOPPED = re.compile(
@@ -229,8 +232,16 @@ class SerialBridge:
         self._serial = serial.Serial(
             port=self._port,
             baudrate=self._baudrate,
-            timeout=1.0,
+            timeout=2.0,
+            write_timeout=2.0,
         )
+
+        # Reset ESP32 via DTR/RTS toggle
+        self._serial.dtr = False
+        self._serial.rts = True
+        time.sleep(0.1)
+        self._serial.rts = False
+        self._serial.dtr = False
 
         self._running = True
         self._reader_thread = threading.Thread(
@@ -293,23 +304,17 @@ class SerialBridge:
 
     def _reader_loop(self) -> None:
         """Background loop that reads lines and dispatches events."""
-        buffer: str = ""
-
         while self._running:
             try:
                 if self._serial is None or not self._serial.is_open:
                     raise serial.SerialException("Port closed")
 
-                raw: bytes = self._serial.read(self._serial.in_waiting or 1)
-                if not raw:
+                raw_line: bytes = self._serial.readline()
+                if not raw_line:
                     continue
 
-                buffer += raw.decode("utf-8", errors="replace")
-
-                while "\n" in buffer:
-                    line, buffer = buffer.split("\n", 1)
-                    line = line.rstrip("\r")
-                    self._handle_line(line)
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                self._handle_line(line)
 
             except (serial.SerialException, OSError) as exc:
                 if not self._running:
@@ -349,21 +354,28 @@ class SerialBridge:
         if not line.strip():
             return
 
+        # Strip leading "> " prompt that Marauder sometimes prepends
+        stripped = line.lstrip("> ").strip()
+
+        # --- Beacon info line (ignored) ---
+        if _RE_BEACON.match(stripped):
+            return
+
         # --- AP scan line ---
-        m = _RE_AP.match(line)
+        m = _RE_AP.match(stripped)
         if m:
             self._emit(
                 APFound(
                     rssi=int(m.group(1)),
-                    ssid=m.group(2),
-                    channel=int(m.group(3)),
-                    bssid=m.group(4).upper(),
+                    channel=int(m.group(2)),
+                    bssid=m.group(3).upper(),
+                    ssid=m.group(4),
                 )
             )
             return
 
         # --- Station scan line ---
-        m = _RE_STATION.match(line)
+        m = _RE_STATION.match(stripped)
         if m:
             self._emit(
                 StationFound(
@@ -375,7 +387,7 @@ class SerialBridge:
             return
 
         # --- BLE device (named) ---
-        m = _RE_BLE_NAMED.match(line)
+        m = _RE_BLE_NAMED.match(stripped)
         if m:
             brand = m.group(2).strip()
             model = m.group(3).strip()
@@ -390,7 +402,7 @@ class SerialBridge:
             return
 
         # --- BLE device (MAC only) ---
-        m = _RE_BLE_MAC.match(line)
+        m = _RE_BLE_MAC.match(stripped)
         if m:
             self._emit(
                 BLEDeviceFound(
@@ -402,18 +414,18 @@ class SerialBridge:
             return
 
         # --- Scan started ---
-        if _RE_SCAN_STARTED_WIFI.search(line):
-            self._emit(ScanStarted(scan_type="wifi"))
+        if _RE_SCAN_STARTED_AP.search(stripped):
+            self._emit(ScanStarted(scan_type="ap"))
             return
-        if _RE_SCAN_STARTED_BT.search(line):
+        if _RE_SCAN_STARTED_BT.search(stripped):
             self._emit(ScanStarted(scan_type="bluetooth"))
             return
-        if _RE_SCAN_STARTED_AP.search(line):
-            self._emit(ScanStarted(scan_type="ap"))
+        if _RE_SCAN_STARTED_STA.search(stripped):
+            self._emit(ScanStarted(scan_type="station"))
             return
 
         # --- Scan stopped ---
-        if _RE_SCAN_STOPPED.search(line):
+        if _RE_SCAN_STOPPED.search(stripped):
             self._emit(ScanStopped())
             return
 

@@ -160,12 +160,6 @@ class Dashboard(Widget):
         if self._ble_table is not None:
             self._ble_table.update_devices(engine.ble_devices)
 
-        if self._activity_feed is not None:
-            # Push any new log entries.  We write them all; the feed's
-            # RichLog will handle dedup / scrollback internally.
-            for _ts, msg in engine.activity_log:
-                self._activity_feed.add_entry("SYS", msg)
-
         # Status bar
         if self._status_bar is not None:
             conn = "[#00ff00]ONLINE[/]" if engine.is_connected else "[#ff0000]OFFLINE[/]"
